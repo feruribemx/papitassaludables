@@ -1,0 +1,46 @@
+PAPITAS SALUDABLES — Cómo usar / publicar
+==========================================
+
+Este archivo (index.html) es tu página completa. Funciona sola, no
+necesitas instalar nada.
+
+--------------------------------------------------
+OPCIÓN 1 — Verla en tu computadora (sin internet)
+--------------------------------------------------
+1. Descomprime el ZIP.
+2. Doble clic en "index.html". Se abre en tu navegador.
+   (El Panel se abre con la contraseña: 1108)
+
+--------------------------------------------------
+OPCIÓN 2 — Publicarla GRATIS y rápido (recomendado)
+--------------------------------------------------
+Con Netlify Drop (arrastrar y soltar, sin configurar nada):
+1. Entra a:  https://app.netlify.com/drop
+2. Arrastra la CARPETA "papitas-saludables-web" (o el archivo
+   index.html) a la zona que dice "Drag and drop".
+3. En segundos te da un enlace público (ej. tunombre.netlify.app).
+4. Comparte ese enlace en tu Instagram, WhatsApp, etc.
+   (Inicia sesión gratis con GitHub para que el enlace sea permanente
+    y puedas ponerle tu dominio.)
+
+--------------------------------------------------
+OPCIÓN 3 — Con Vercel + GitHub
+--------------------------------------------------
+1. Sube esta carpeta a un repositorio nuevo en GitHub.
+2. En Vercel: "Add New Project" -> importa ese repositorio -> Deploy.
+   (No necesita configuración: es un sitio estático.)
+3. En Vercel -> Settings -> Domains: conecta tu dominio.
+
+--------------------------------------------------
+NOTAS IMPORTANTES
+--------------------------------------------------
+- Los pedidos de los clientes te llegan por WhatsApp al 33 1465 7995.
+- Los datos (pedidos, inventario, clientes) se guardan en el
+  navegador de cada dispositivo. Tu Panel es tu herramienta en TU
+  equipo. Haz respaldos con el botón "Exportar respaldo".
+- Contraseña del Panel: 1108
+- Códigos de distribuidora:
+    Kary García     -> KARY7420
+    Itzel García    -> ITZEL3815
+    Marisol Martínez-> MARISOL2964
+    Michelle López  -> MICHELLE5083
