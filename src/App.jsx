@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { VENDEDORAS, DISTRIBUIDORAS, PROVEEDORES, CLIENTES, PRECIO_PROVISIONAL } from "./config.js";
+import { supabase, hayNube } from "./supabase.js";
 
 /* ============================================================
    PAPITAS SALUDABLES — Tienda + Centro de control
@@ -18,15 +20,7 @@ const CODIGOS_DESCUENTO = {
 };
 
 
-// ---------- Distribuidoras: precio por distribuidora (base + ajustes por categoría/producto) ----------
-// ⚠️ Los códigos son de ejemplo; cámbialos por los reales. El precio se toma así:
-//    porSku[sku]  →  porCategoria[categoria]  →  base
-const DISTRIBUIDORAS = {
-  "KARY7420":     { nombre: "Kary García",      base: 28, porCategoria: { "Pepino": 37, "Betabel": 37 }, granel: { "250": { base: 80 }, "500": { base: 137.5 }, "1000": { base: 275, porCategoria: { "Pepino": 375, "Betabel": 375 } } } },
-  "ITZEL3815":    { nombre: "Itzel García",     base: 39 },
-  "MARISOL2964":  { nombre: "Marisol Martínez", base: 29, porCategoria: { "Pepino": 39, "Betabel": 39 } },
-  "MICHELLE5083": { nombre: "Michelle López",   base: 23, porCategoria: { "Pepino": 28, "Betabel": 32 }, porSku: { "JIC-CE": 24 } },
-};
+// Distribuidoras y sus precios están en config.js
 const precioDistribuidora = (cfg, p) =>
   (cfg.porSku && cfg.porSku[p.sku] != null) ? cfg.porSku[p.sku]
   : (cfg.porCategoria && cfg.porCategoria[p.categoria] != null) ? cfg.porCategoria[p.categoria]
@@ -39,8 +33,7 @@ const WHATSAPP_TIENDA = "523314657995";
 // ---------- Contraseña del Panel (acceso del administrador) ----------
 const PANEL_PIN = "1108";
 
-// ---------- Vendedoras registradas (envíame los nombres y los agrego al menú) ----------
-const VENDEDORAS = ["Kary García", "Michelle López", "Itzel García", "Marisol Martínez", "Anahí López"];
+// Vendedoras están en config.js
 
 // ---------- Fotos de producto por SKU (se van agregando conforme lleguen) ----------
 const PHOTOS = {
@@ -172,7 +165,7 @@ async function saveKey(key, val) {
 }
 
 // ---------- Lista de clientes conocidos (de pedidos + registrados) ----------
-function listaClientes(orders, manuales) {
+function listaClientes(orders, manuales, extra) {
   const map = {};
   (orders || []).forEach((o) => { // los pedidos vienen del más nuevo al más viejo → gana el dato más reciente
     const key = o.cliente.telefono || o.cliente.correo || o.cliente.nombre;
@@ -182,13 +175,25 @@ function listaClientes(orders, manuales) {
     const key = c.telefono || c.correo || c.nombre;
     if (!map[key]) map[key] = { ...c };
   });
+  (extra || []).forEach((c) => {
+    const key = c.telefono || c.correo || c.nombre;
+    if (key && !map[key]) map[key] = { ...c };
+  });
   return Object.values(map);
+}
+
+// Código secuencial provisional: 111,222,...,999,1111,2222,...
+function codigoSecuencial(n) {
+  const bloque = Math.floor(n / 9);
+  const digito = (n % 9) + 1;
+  return String(digito).repeat(bloque + 3);
 }
 
 // ============================================================
 export default function App() {
   const [ready, setReady] = useState(false);
   const [view, setView] = useState("tienda"); // tienda | panel
+  const [distsRemote, setDistsRemote] = useState({}); // distribuidoras provisionales (Supabase)
   const [tab, setTab] = useState("resumen");
 
   const catalog = SEED_CATALOG;
@@ -240,6 +245,30 @@ export default function App() {
   useEffect(() => { if (ready) saveKey("proveedor_pedidos", proveedorPedidos); }, [proveedorPedidos, ready]);
   useEffect(() => { if (ready) saveKey("fecha_corte", fechaCorte); }, [fechaCorte, ready]);
 
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.from("distribuidoras").select("codigo,nombre,costo_base").then(({ data }) => {
+      if (!data) return;
+      const m = {}; data.forEach((d) => { m[d.codigo] = { nombre: d.nombre, base: Number(d.costo_base) }; });
+      setDistsRemote(m);
+    });
+  }, []);
+
+  // Trae TODOS los pedidos de la nube y se mantiene al dia en tiempo real
+  const cargarPedidosNube = async () => {
+    if (!supabase) return;
+    const { data } = await supabase.from("pedidos").select("data").order("actualizado", { ascending: false });
+    if (data) setOrders(data.map((r) => r.data));
+  };
+  useEffect(() => {
+    if (!supabase) return;
+    cargarPedidosNube();
+    const ch = supabase.channel("pedidos_admin")
+      .on("postgres_changes", { event: "*", schema: "public", table: "pedidos" }, cargarPedidosNube)
+      .subscribe();
+    return () => supabase.removeChannel(ch);
+  }, []);
+
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2600); };
 
   // ---- respaldo: exportar / importar ----
@@ -288,7 +317,8 @@ export default function App() {
   const codigoPrecio = CODIGOS_DESCUENTO[codeKey];        // precio del código (undefined si no existe)
   const promoOk = codigoPrecio != null;
   const distKey = distNum.trim().toUpperCase().replace(/\s+/g, "");
-  const distConfig = esDist && DISTRIBUIDORAS[distKey] ? DISTRIBUIDORAS[distKey] : null;
+  const DIST_MAP = { ...DISTRIBUIDORAS, ...distsRemote };
+  const distConfig = esDist && DIST_MAP[distKey] ? DIST_MAP[distKey] : null;
   const distOk = !!distConfig;
   const distNombre = distConfig ? distConfig.nombre : "";
 
@@ -356,9 +386,25 @@ export default function App() {
   }, [orders, fechaCorte]);
 
   // ---- crear pedido ----
+  // ---- sincronizacion de pedidos con la nube (Supabase) ----
+  const syncPedido = (order) => {
+    if (!supabase || !order) return;
+    supabase.from("pedidos").upsert({
+      folio: order.folio,
+      telefono: (order.cliente && order.cliente.telefono) || "",
+      estatus: order.estatus || "Nuevo",
+      pagado: !!order.pagado,
+      fecha: order.fecha || null,
+      data: order,
+    }, { onConflict: "folio" }).then(() => {});
+  };
+  const borrarPedidoNube = (folio) => {
+    if (!supabase) return;
+    supabase.from("pedidos").delete().eq("folio", folio).then(() => {});
+  };
+
   const placeOrder = (cliente, extras) => {
-    const num = orders.length + 1;
-    const folio = "PED-" + String(num).padStart(4, "0");
+    const folio = "PED-" + Date.now().toString(36).toUpperCase().slice(-6);
     const order = {
       folio,
       fecha: new Date().toISOString(),
@@ -381,6 +427,14 @@ export default function App() {
       stockDescontado: false,
     };
     setOrders((o) => [order, ...o]);
+    syncPedido(order);
+    if (distOk && supabase) {
+      const filas = cartItems.filter((i) => !i.granel).map((i) => ({
+        codigo: distKey, sku: i.sku, sabor: i.sabor, categoria: i.categoria,
+        cantidad: i.qty, costo_unit: i.precio, precio_publico: 50,
+      }));
+      if (filas.length) supabase.from("pedidos_dist").insert(filas).then(() => {});
+    }
     showToast("¡Pedido " + folio + " guardado! 🎉");
     return folio;
   };
@@ -388,6 +442,22 @@ export default function App() {
   const finishCheckout = () => { setCart({}); setPromo(""); setEsDist(false); setDistNum(""); setCheckout(false); setCartOpen(false); };
 
   // ---- registrar solicitud de distribuidor ----
+  const registrarDistribuidora = async (data) => {
+    if (!supabase) return null;
+    for (let i = 0; i < 6; i++) {
+      const { count } = await supabase.from("distribuidoras").select("*", { count: "exact", head: true });
+      const codigo = codigoSecuencial((count || 0) + i);
+      const { error } = await supabase.from("distribuidoras").insert({
+        codigo, nombre: data.nombre, telefono: data.telefono, correo: data.correo,
+        estado: data.estado, ciudad: data.ciudad, costo_base: PRECIO_PROVISIONAL,
+      });
+      if (!error) {
+        setDistsRemote((m) => ({ ...m, [codigo]: { nombre: data.nombre, base: PRECIO_PROVISIONAL } }));
+        return codigo;
+      }
+    }
+    return null;
+  };
   const addDistribuidor = (data) => {
     const folio = "DIST-" + String(distribs.length + 1).padStart(4, "0");
     const registro = { folio, fecha: new Date().toISOString(), estatus: "Nuevo", ...data };
@@ -406,15 +476,12 @@ export default function App() {
         const idx = ESTATUS.indexOf(o.estatus);
         if (idx < 0 || idx >= ESTATUS.length - 1) return o;
         const next = ESTATUS[idx + 1];
+        let u;
         if (next === "Entregado" && !o.stockDescontado) {
-          setStock((s) => {
-            const n = { ...s };
-            o.items.forEach((it) => { if (it.granel) return; n[it.sku] = (n[it.sku] || 0) - it.qty; });
-            return n;
-          });
-          return { ...o, estatus: next, stockDescontado: true };
-        }
-        return { ...o, estatus: next };
+          setStock((sk) => { const n = { ...sk }; o.items.forEach((it) => { if (it.granel) return; n[it.sku] = (n[it.sku] || 0) - it.qty; }); return n; });
+          u = { ...o, estatus: next, stockDescontado: true };
+        } else { u = { ...o, estatus: next }; }
+        syncPedido(u); return u;
       })
     );
   };
@@ -422,57 +489,53 @@ export default function App() {
     setOrders((list) =>
       list.map((o) => {
         if (o.folio !== folio) return o;
+        let u;
         if (estatus === "Entregado" && !o.stockDescontado) {
-          setStock((s) => {
-            const n = { ...s };
-            o.items.forEach((it) => { if (it.granel) return; n[it.sku] = (n[it.sku] || 0) - it.qty; });
-            return n;
-          });
-          return { ...o, estatus, stockDescontado: true };
-        }
-        return { ...o, estatus };
+          setStock((sk) => { const n = { ...sk }; o.items.forEach((it) => { if (it.granel) return; n[it.sku] = (n[it.sku] || 0) - it.qty; }); return n; });
+          u = { ...o, estatus, stockDescontado: true };
+        } else { u = { ...o, estatus }; }
+        syncPedido(u); return u;
       })
     );
   };
-  const deleteOrder = (folio) => setOrders((l) => l.filter((o) => o.folio !== folio));
+  const deleteOrder = (folio) => { borrarPedidoNube(folio); setOrders((l) => l.filter((o) => o.folio !== folio)); };
   const setEnvio = (folio, val) =>
-    setOrders((list) => list.map((o) => (o.folio === folio ? { ...o, envio: Math.max(0, Math.round(Number(val) || 0)) } : o)));
+    setOrders((list) => list.map((o) => { if (o.folio !== folio) return o; const u = { ...o, envio: Math.max(0, Math.round(Number(val) || 0)) }; syncPedido(u); return u; }));
   const setDescuento = (folio, val) =>
-    setOrders((list) => list.map((o) => (o.folio === folio ? { ...o, descuento: Math.max(0, Math.round(Number(val) || 0)) } : o)));
-  // Editar contenido del pedido (admin): cantidades, quitar productos, datos del cliente
+    setOrders((list) => list.map((o) => { if (o.folio !== folio) return o; const u = { ...o, descuento: Math.max(0, Math.round(Number(val) || 0)) }; syncPedido(u); return u; }));
   const recalcTotal = (items) => items.reduce((a, it) => a + it.precio * it.qty, 0);
   const editItemQty = (folio, idx, val) =>
     setOrders((list) => list.map((o) => {
       if (o.folio !== folio) return o;
       const items = o.items.map((it, i) => (i === idx ? { ...it, qty: Math.max(1, Math.round(Number(val) || 1)) } : it));
-      return { ...o, items, total: recalcTotal(items) };
+      const u = { ...o, items, total: recalcTotal(items) }; syncPedido(u); return u;
     }));
   const removeItem = (folio, idx) =>
     setOrders((list) => list.map((o) => {
       if (o.folio !== folio) return o;
       const items = o.items.filter((_, i) => i !== idx);
-      return { ...o, items, total: recalcTotal(items) };
+      const u = { ...o, items, total: recalcTotal(items) }; syncPedido(u); return u;
     }));
   const editClienteOrder = (folio, data) =>
-    setOrders((list) => list.map((o) => (o.folio === folio ? { ...o, cliente: { ...o.cliente, ...data } } : o)));
+    setOrders((list) => list.map((o) => { if (o.folio !== folio) return o; const u = { ...o, cliente: { ...o.cliente, ...data } }; syncPedido(u); return u; }));
   const togglePagado = (folio) =>
-    setOrders((list) => list.map((o) => (o.folio === folio ? { ...o, pagado: !o.pagado } : o)));
+    setOrders((list) => list.map((o) => { if (o.folio !== folio) return o; const u = { ...o, pagado: !o.pagado }; syncPedido(u); return u; }));
   const setCampo = (folio, campo, val) =>
-    setOrders((list) => list.map((o) => (o.folio === folio ? { ...o, [campo]: val } : o)));
-  // Actualiza los datos del cliente en todos sus pedidos (misma persona)
+    setOrders((list) => list.map((o) => { if (o.folio !== folio) return o; const u = { ...o, [campo]: val }; syncPedido(u); return u; }));
   const updateCliente = (key, data) => {
     setOrders((list) => list.map((o) => {
       const k = o.cliente.telefono || o.cliente.correo || o.cliente.nombre;
-      return k === key ? { ...o, cliente: { ...o.cliente, ...data } } : o;
+      if (k !== key) return o; const u = { ...o, cliente: { ...o.cliente, ...data } }; syncPedido(u); return u;
     }));
     setManuales((list) => list.map((c) => ((c.telefono || c.correo || c.nombre) === key ? { ...c, ...data } : c)));
   };
-  // Elimina al cliente y todos sus pedidos (y su registro manual si lo tiene)
   const deleteCliente = (key) => {
-    setOrders((list) => list.filter((o) => (o.cliente.telefono || o.cliente.correo || o.cliente.nombre) !== key));
+    setOrders((list) => {
+      list.filter((o) => (o.cliente.telefono || o.cliente.correo || o.cliente.nombre) === key).forEach((o) => borrarPedidoNube(o.folio));
+      return list.filter((o) => (o.cliente.telefono || o.cliente.correo || o.cliente.nombre) !== key);
+    });
     setManuales((list) => list.filter((c) => (c.telefono || c.correo || c.nombre) !== key));
   };
-  // Registra un cliente nuevo sin compra
   const addClienteManual = (data) => setManuales((l) => [{ ...data, fecha: new Date().toISOString() }, ...l]);
 
   // ---- pedidos a proveedor ----
@@ -538,6 +601,20 @@ export default function App() {
             onClick={() => setView("rastrear")}
           >
             📦 Rastrea tu pedido
+          </button>
+          <button
+            className="tabbtn"
+            style={view === "boletin" ? styles.navActive : styles.navIdle}
+            onClick={() => setView("boletin")}
+          >
+            📰 Boletín
+          </button>
+          <button
+            className="tabbtn"
+            style={view === "mipanel" ? styles.navDist : styles.navIdle}
+            onClick={() => setView("mipanel")}
+          >
+            📈 Mi panel
           </button>
           <button
             className="tabbtn"
@@ -637,10 +714,24 @@ export default function App() {
         </main>
       )}
 
+      {/* ---------- BOLETÍN ---------- */}
+      {view === "boletin" && (
+        <main style={styles.main}>
+          <Boletin />
+        </main>
+      )}
+
+      {/* ---------- MI PANEL (distribuidora) ---------- */}
+      {view === "mipanel" && (
+        <main style={styles.main}>
+          <MiPanel />
+        </main>
+      )}
+
       {/* ---------- QUIERO SER DISTRIBUIDOR ---------- */}
       {view === "distribuidor" && (
         <main style={styles.main}>
-          <DistribuidorView onSubmit={addDistribuidor} onGoTienda={() => setView("tienda")} />
+          <DistribuidorView onSubmit={addDistribuidor} onRegistrar={registrarDistribuidora} onGoTienda={() => setView("tienda")} />
         </main>
       )}
 
@@ -831,7 +922,7 @@ export default function App() {
           codigo={promoOk ? codeKey.toUpperCase() : ""}
           distribuidora={distOk ? `${distNombre} (núm. ${distNum.trim()})` : ""}
           prefill={distOk ? { nombre: distNombre, ...(distConfig.datos || {}) } : null}
-          clientes={listaClientes(orders, manuales)}
+          clientes={listaClientes(orders, manuales, CLIENTES)}
           onClose={() => setCheckout(false)}
           onFinish={finishCheckout}
           onSubmit={placeOrder}
@@ -1830,7 +1921,7 @@ function Proveedores({ catalog, stock, committed, pedidos, onAdd, onRecibir, onD
 
   const sugerido = (p) => Math.max(0, (committed[p.sku] || 0) + p.min - Math.max(0, stock[p.sku] ?? 0) - (porLlegar[p.sku] || 0));
 
-  const [proveedor, setProveedor] = useState("Omar");
+  const [proveedor, setProveedor] = useState(PROVEEDORES[0] || "Otro");
   const [cant, setCant] = useState({});
   const reiniciar = () => {
     const o = {};
@@ -1858,9 +1949,7 @@ function Proveedores({ catalog, stock, committed, pedidos, onAdd, onRecibir, onD
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
           <h3 style={{ ...styles.panelTitle, margin: 0 }}>Nuevo pedido a proveedor</h3>
           <select className="statusel" value={proveedor} onChange={(e) => setProveedor(e.target.value)}>
-            <option>Omar</option>
-            <option>Guillermo</option>
-            <option>Otro</option>
+            {PROVEEDORES.map((pr) => <option key={pr}>{pr}</option>)}
           </select>
           <button className="ghost small" onClick={reiniciar}>↺ Usar sugerido</button>
           <button className="cta small" style={{ marginLeft: "auto" }} onClick={guardar}>Registrar pedido ({totalAPedir})</button>
@@ -1933,6 +2022,165 @@ function Proveedores({ catalog, stock, committed, pedidos, onAdd, onRecibir, onD
     </div>
   );
 }
+
+// ---------------- VISTA: BOLETÍN (tiempo real) ----------------
+function Boletin() {
+  const [rows, setRows] = useState([])
+  const [cargando, setCargando] = useState(true)
+
+  const cargar = async () => {
+    if (!supabase) { setCargando(false); return }
+    const { data } = await supabase.from("pedidos_dist").select("sabor,categoria,cantidad")
+    const map = {}
+    ;(data || []).forEach((r) => { if (!r.sabor) return; if (!map[r.sabor]) map[r.sabor] = { sabor: r.sabor, categoria: r.categoria, piezas: 0 }; map[r.sabor].piezas += r.cantidad })
+    setRows(Object.values(map).sort((a, b) => b.piezas - a.piezas))
+    setCargando(false)
+  }
+  useEffect(() => {
+    cargar()
+    if (!supabase) return
+    const ch = supabase.channel("boletin").on("postgres_changes", { event: "*", schema: "public", table: "pedidos_dist" }, cargar).subscribe()
+    return () => supabase.removeChannel(ch)
+  }, [])
+
+  const max = rows.length ? rows[0].piezas : 1
+
+  return (
+    <div className="fadeup">
+      <section style={{ textAlign: "center", padding: "18px 0 6px" }}>
+        <span className="promo-pill" style={{ display: "inline-block", marginBottom: 10 }}>En tiempo real ⚡</span>
+        <h1 style={styles.heroTitle}>Los más vendidos ahora mismo</h1>
+        <p style={styles.heroSub}>Ranking de sabores según lo que están moviendo las distribuidoras. Se actualiza solo.</p>
+      </section>
+      {!supabase ? (
+        <Empty icon="☁️" text="Conecta Supabase (Fase 2) para ver el boletín en tiempo real." />
+      ) : cargando ? (
+        <Empty icon="⏳" text="Cargando el boletín…" />
+      ) : rows.length === 0 ? (
+        <Empty icon="📊" text="Aún no hay movimientos registrados. En cuanto las distribuidoras pidan, aparecerán aquí." />
+      ) : (
+        <div style={{ maxWidth: 620, margin: "0 auto" }}>
+          {rows.slice(0, 12).map((r, i) => (
+            <div key={r.sabor} className="card" style={{ marginBottom: 10, padding: "12px 16px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontFamily: "'Baloo 2', cursive", fontSize: 22, color: i < 3 ? "#F04E97" : "#c9b6c0", width: 32 }}>{i + 1}</span>
+                <span style={{ ...styles.dot, background: catColor(r.categoria) }} />
+                <span style={{ flex: 1, fontWeight: 800 }}>{r.sabor}</span>
+                <span style={{ fontFamily: "'Baloo 2', cursive", color: "#4A2C3A" }}>{r.piezas} pza</span>
+              </div>
+              <div style={{ marginTop: 8, height: 8, background: "#f2e6da", borderRadius: 999, overflow: "hidden" }}>
+                <div style={{ width: `${Math.round((r.piezas / max) * 100)}%`, height: "100%", background: catColor(r.categoria) }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------- VISTA: MI PANEL (distribuidora, tiempo real) ----------------
+function MiPanel() {
+  const money = (n) => "$" + Math.round(n || 0).toLocaleString("es-MX")
+  const [codigo, setCodigo] = useState(() => { try { return localStorage.getItem("mi_codigo_dist") || "" } catch (e) { return "" } })
+  const [activo, setActivo] = useState(() => { try { return !!localStorage.getItem("mi_codigo_dist") } catch (e) { return false } })
+  const [entrada, setEntrada] = useState("")
+  const [rows, setRows] = useState([])
+  const [cargando, setCargando] = useState(false)
+
+  const cargar = async (cod) => {
+    if (!supabase || !cod) return
+    setCargando(true)
+    const { data } = await supabase.from("pedidos_dist").select("*").eq("codigo", cod).order("fecha", { ascending: false })
+    setRows(data || [])
+    setCargando(false)
+  }
+  useEffect(() => {
+    if (!activo || !codigo) return
+    cargar(codigo)
+    if (!supabase) return
+    const ch = supabase.channel("mipanel_" + codigo).on("postgres_changes", { event: "*", schema: "public", table: "pedidos_dist", filter: `codigo=eq.${codigo}` }, () => cargar(codigo)).subscribe()
+    return () => supabase.removeChannel(ch)
+  }, [activo, codigo])
+
+  const entrar = () => {
+    const c = entrada.trim().toUpperCase().replace(/\s+/g, "")
+    if (!c) return
+    try { localStorage.setItem("mi_codigo_dist", c) } catch (e) {}
+    setCodigo(c); setActivo(true)
+  }
+  const salir = () => { try { localStorage.removeItem("mi_codigo_dist") } catch (e) {} setActivo(false); setCodigo(""); setRows([]); setEntrada("") }
+
+  const k = useMemo(() => {
+    let piezas = 0, costo = 0, ganancia = 0
+    rows.forEach((r) => { piezas += r.cantidad; costo += r.cantidad * r.costo_unit; ganancia += r.cantidad * (50 - r.costo_unit) })
+    return { piezas, costo, ganancia }
+  }, [rows])
+  const porMes = useMemo(() => {
+    const map = {}
+    rows.forEach((r) => { const key = (r.fecha || "").slice(0, 7); if (!map[key]) map[key] = { mes: key, piezas: 0, ganancia: 0 }; map[key].piezas += r.cantidad; map[key].ganancia += r.cantidad * (50 - r.costo_unit) })
+    return Object.values(map).sort((a, b) => a.mes.localeCompare(b.mes))
+  }, [rows])
+  const topSabor = useMemo(() => {
+    const map = {}; rows.forEach((r) => { map[r.sabor] = (map[r.sabor] || 0) + r.cantidad })
+    const arr = Object.entries(map).sort((a, b) => b[1] - a[1]); return arr.length ? arr[0][0] : "—"
+  }, [rows])
+
+  if (!supabase) return (
+    <div className="fadeup"><Empty big icon="☁️" text="Conecta Supabase (Fase 2) para que las distribuidoras vean su panel en tiempo real." /></div>
+  )
+
+  if (!activo) return (
+    <div className="fadeup">
+      <section style={{ textAlign: "center", padding: "18px 0 10px" }}>
+        <h1 style={styles.heroTitle}>Mi panel de distribuidora</h1>
+        <p style={styles.heroSub}>Escribe tu código para ver cuántas papitas moviste, a qué precio y tu ganancia estimada.</p>
+      </section>
+      <div style={styles.rastrearCard}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input style={{ ...inp(), flex: "1 1 200px" }} placeholder="Tu código (ej. 111)" value={entrada}
+            onChange={(e) => setEntrada(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") entrar() }} />
+          <button className="cta" onClick={entrar}>Entrar</button>
+        </div>
+        <p style={{ fontSize: 12, color: "#8a7683", marginTop: 10 }}>¿Aún no tienes código? Regístrate en “Quiero ser distribuidor”.</p>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="fadeup">
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+        <span className="badge" style={{ background: "#9B6FCE", color: "#fff", fontWeight: 800, fontSize: 12, padding: "4px 10px", borderRadius: 999 }}>Código {codigo}</span>
+        <button className="ghost small" onClick={salir}>Cambiar código</button>
+      </div>
+      <div style={styles.kpis}>
+        <div className="kpi-c" style={{ ...kpiBox, borderTop: "5px solid #F2A93B" }}><div style={kpiV("#F2A93B")}>{k.piezas}</div><div style={kpiL}>Piezas movidas</div></div>
+        <div className="kpi-c" style={{ ...kpiBox, borderTop: "5px solid #E8477E" }}><div style={kpiV("#E8477E")}>{money(k.costo)}</div><div style={kpiL}>Te costaron</div></div>
+        <div className="kpi-c" style={{ ...kpiBox, borderTop: "5px solid #9FC131" }}><div style={kpiV("#6e8f18")}>{money(k.ganancia)}</div><div style={kpiL}>Ganancia estimada</div></div>
+        <div className="kpi-c" style={{ ...kpiBox, borderTop: "5px solid #9B6FCE" }}><div style={{ ...kpiV("#9B6FCE"), fontSize: 20 }}>{topSabor}</div><div style={kpiL}>Tu sabor top</div></div>
+      </div>
+      <p style={{ fontSize: 12, color: "#8a7683", margin: "-6px 2px 16px" }}>
+        * Ganancia estimada suponiendo que vendes al público a $50 por bolsa (ganancia = $50 − tu costo).
+      </p>
+
+      <div style={styles.softPanel}>
+        <h3 style={styles.panelTitle}>Tu mes a mes</h3>
+        {porMes.length === 0 ? <Empty icon="📅" text="Aún no tienes movimientos." /> : (
+          porMes.map((m) => (
+            <div key={m.mes} style={styles.listRow}>
+              <span style={{ flex: 1, fontWeight: 700 }}>{m.mes}</span>
+              <span style={{ color: "#8a7683", marginRight: 12 }}>{m.piezas} pza</span>
+              <span style={{ fontFamily: "'Baloo 2', cursive", color: "#6e8f18" }}>{money(m.ganancia)}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+const kpiBox = { background: "#fff", borderRadius: 18, padding: 16, boxShadow: "0 6px 16px rgba(224,120,160,.12)" }
+const kpiV = (c) => ({ fontFamily: "'Baloo 2', cursive", fontSize: 26, color: c, lineHeight: 1 })
+const kpiL = { fontSize: 13, color: "#7a6570", fontWeight: 700, marginTop: 4 }
 
 // ---------------- VISTA: RASTREA TU PEDIDO ----------------
 function RastrearView({ orders }) {
@@ -2013,13 +2261,14 @@ function RastrearView({ orders }) {
 const DIST_ESTATUS = ["Nuevo", "Contactado", "Activo", "Descartado"];
 const DIST_COLOR = { "Nuevo": "#F04E97", "Contactado": "#F2A93B", "Activo": "#9FC131", "Descartado": "#9AA0A6" };
 
-function DistribuidorView({ onSubmit, onGoTienda }) {
+function DistribuidorView({ onSubmit, onRegistrar, onGoTienda }) {
   const [f, setF] = useState({
     nombre: "", negocio: "", telefono: "", correo: "", estado: "", ciudad: "",
     tipo: "", volumen: "", canal: "", mensaje: "",
   });
   const [err, setErr] = useState({});
-  const [done, setDone] = useState(null);
+  const [done, setDone] = useState(null); // { folio, codigo }
+  const [enviando, setEnviando] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
 
   const validate = () => {
@@ -2031,14 +2280,19 @@ function DistribuidorView({ onSubmit, onGoTienda }) {
     setErr(e);
     return Object.keys(e).length === 0;
   };
-  const submit = () => {
+  const submit = async () => {
     if (!validate()) return;
-    const folio = onSubmit({
+    setEnviando(true);
+    const datos = {
       nombre: f.nombre.trim(), negocio: f.negocio.trim(), telefono: f.telefono.trim(),
       correo: f.correo.trim(), estado: f.estado, ciudad: f.ciudad.trim(),
       tipo: f.tipo, volumen: f.volumen, canal: f.canal.trim(), mensaje: f.mensaje.trim(),
-    });
-    setDone(folio);
+    };
+    const folio = onSubmit(datos);
+    let codigo = null;
+    if (onRegistrar) { try { codigo = await onRegistrar(datos); } catch (e) { codigo = null; } }
+    setEnviando(false);
+    setDone({ folio, codigo });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -2046,15 +2300,31 @@ function DistribuidorView({ onSubmit, onGoTienda }) {
     return (
       <div className="fadeup" style={{ textAlign: "center", padding: "48px 16px", maxWidth: 560, margin: "0 auto" }}>
         <div style={{ fontSize: 60 }}>🎉</div>
-        <h1 style={{ fontFamily: "'Baloo 2', cursive", fontSize: 34, color: "#F04E97", margin: "8px 0 6px" }}>
-          ¡Solicitud recibida!
+        <h1 style={{ fontFamily: "'Baloo 2', cursive", fontSize: 32, color: "#F04E97", margin: "8px 0 6px" }}>
+          ¡Bienvenida distribuidora!
         </h1>
-        <p style={{ fontSize: 16, color: "#7a6570", lineHeight: 1.5 }}>
-          Gracias por tu interés en ser distribuidor de Papitas Saludables. Guardamos tus datos
-          (folio <b>{done}</b>) y te contactaremos muy pronto por WhatsApp o correo con la lista de
-          precios preferenciales para tu zona.
-        </p>
-        <button className="cta" style={{ marginTop: 22 }} onClick={onGoTienda}>Ir a la tienda</button>
+        {done.codigo ? (
+          <>
+            <p style={{ fontSize: 16, color: "#7a6570", lineHeight: 1.5, marginBottom: 14 }}>
+              Este es tu <b>código provisional</b> de distribuidora. Guárdalo: con él activas tu
+              precio y puedes empezar a hacer tus pedidos en la tienda.
+            </p>
+            <div style={{ display: "inline-block", background: "#F5EEFB", border: "2px solid #E9E2F4", borderRadius: 16, padding: "14px 28px" }}>
+              <div style={{ fontSize: 12, color: "#7a5aa8", fontWeight: 800 }}>TU CÓDIGO</div>
+              <div style={{ fontFamily: "'Baloo 2', cursive", fontSize: 40, color: "#9B6FCE", letterSpacing: 3 }}>{done.codigo}</div>
+            </div>
+            <p style={{ fontSize: 13, color: "#8a7683", marginTop: 14, maxWidth: 420, marginLeft: "auto", marginRight: "auto" }}>
+              En la tienda activa “Soy distribuidora” y escribe tu código. Tu precio inicial es
+              provisional; te confirmaremos tus precios finales por WhatsApp.
+            </p>
+          </>
+        ) : (
+          <p style={{ fontSize: 16, color: "#7a6570", lineHeight: 1.5 }}>
+            Gracias por tu interés. Guardamos tus datos (folio <b>{done.folio}</b>) y te
+            contactaremos muy pronto por WhatsApp o correo con tu código y tus precios.
+          </p>
+        )}
+        <div style={{ marginTop: 22 }}><button className="cta" onClick={onGoTienda}>Ir a la tienda</button></div>
       </div>
     );
   }
@@ -2164,8 +2434,8 @@ function DistribuidorView({ onSubmit, onGoTienda }) {
           </Field>
         </div>
 
-        <button className="cta" style={{ marginTop: 16, width: "100%" }} onClick={submit}>
-          Enviar solicitud y recibir precios de distribuidor →
+        <button className="cta" style={{ marginTop: 16, width: "100%" }} onClick={submit} disabled={enviando}>
+          {enviando ? "Generando tu código…" : "Quiero ser distribuidora · generar mi código →"}
         </button>
       </div>
     </div>
