@@ -2057,16 +2057,23 @@ function Boletin() {
 
   const cargar = async () => {
     if (!supabase) { setCargando(false); return }
-    const { data } = await supabase.from("pedidos_dist").select("sabor,categoria,cantidad")
+    const { data } = await supabase.from("pedidos").select("data")
     const map = {}
-    ;(data || []).forEach((r) => { if (!r.sabor) return; if (!map[r.sabor]) map[r.sabor] = { sabor: r.sabor, categoria: r.categoria, piezas: 0 }; map[r.sabor].piezas += r.cantidad })
+    ;(data || []).forEach((r) => {
+      const o = r.data; if (!o || o.estatus === "Cancelado") return
+      ;(o.items || []).forEach((it) => {
+        if (it.granel || !it.sabor) return
+        if (!map[it.sabor]) map[it.sabor] = { sabor: it.sabor, categoria: it.categoria, piezas: 0 }
+        map[it.sabor].piezas += it.qty
+      })
+    })
     setRows(Object.values(map).sort((a, b) => b.piezas - a.piezas))
     setCargando(false)
   }
   useEffect(() => {
     cargar()
     if (!supabase) return
-    const ch = supabase.channel("boletin").on("postgres_changes", { event: "*", schema: "public", table: "pedidos_dist" }, cargar).subscribe()
+    const ch = supabase.channel("boletin").on("postgres_changes", { event: "*", schema: "public", table: "pedidos" }, cargar).subscribe()
     return () => supabase.removeChannel(ch)
   }, [])
 
@@ -2077,14 +2084,14 @@ function Boletin() {
       <section style={{ textAlign: "center", padding: "18px 0 6px" }}>
         <span className="promo-pill" style={{ display: "inline-block", marginBottom: 10 }}>En tiempo real ⚡</span>
         <h1 style={styles.heroTitle}>Los más vendidos ahora mismo</h1>
-        <p style={styles.heroSub}>Ranking de sabores según lo que están moviendo las distribuidoras. Se actualiza solo.</p>
+        <p style={styles.heroSub}>Ranking de sabores según todas las ventas (distribuidoras y menudeo). Se actualiza solo.</p>
       </section>
       {!supabase ? (
         <Empty icon="☁️" text="Conecta Supabase (Fase 2) para ver el boletín en tiempo real." />
       ) : cargando ? (
         <Empty icon="⏳" text="Cargando el boletín…" />
       ) : rows.length === 0 ? (
-        <Empty icon="📊" text="Aún no hay movimientos registrados. En cuanto las distribuidoras pidan, aparecerán aquí." />
+        <Empty icon="📊" text="Aún no hay ventas registradas. En cuanto entren pedidos, aparecerán aquí." />
       ) : (
         <div style={{ maxWidth: 620, margin: "0 auto" }}>
           {rows.slice(0, 12).map((r, i) => (
