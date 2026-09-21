@@ -30,8 +30,9 @@ const precioDistribuidora = (cfg, p) =>
 // Formato wa.me: 52 + 10 dígitos, sin espacios ni símbolos.
 const WHATSAPP_TIENDA = "523314657995";
 
-// ---------- Contraseña del Panel (acceso del administrador) ----------
-const PANEL_PIN = "1108";
+// ---------- Acceso del administrador (login del Panel) ----------
+const ADMIN_USUARIO = "papitasadmin";
+const ADMIN_CLAVE = "robin1108.";
 
 // Vendedoras están en config.js
 
@@ -205,7 +206,8 @@ export default function App() {
   const [fechaCorte, setFechaCorte] = useState("2026-09-01");
 
   const [cart, setCart] = useState({}); // sku -> qty
-  const [panelUnlocked, setPanelUnlocked] = useState(false);
+  const [panelUnlocked, setPanelUnlocked] = useState(() => { try { return localStorage.getItem("admin_ok") === "1"; } catch (e) { return false; } });
+  const cerrarSesionAdmin = () => { try { localStorage.removeItem("admin_ok"); } catch (e) {} setPanelUnlocked(false); };
   const fileRef = useRef(null);
   const [promo, setPromo] = useState("");
   const [esDist, setEsDist] = useState(false);
@@ -614,7 +616,7 @@ export default function App() {
             style={view === "mipanel" ? styles.navDist : styles.navIdle}
             onClick={() => setView("mipanel")}
           >
-            📈 Mi panel
+            📈 Mi tablero
           </button>
           <button
             className="tabbtn"
@@ -748,6 +750,7 @@ export default function App() {
             <button className="ghost small" onClick={exportarRespaldo}>⬇️ Exportar respaldo</button>
             <button className="ghost small" onClick={() => fileRef.current && fileRef.current.click()}>⬆️ Importar respaldo</button>
             <input ref={fileRef} type="file" accept=".json,application/json" onChange={importarRespaldo} style={{ display: "none" }} />
+            <button className="ghost small" onClick={cerrarSesionAdmin}>🔒 Cerrar sesión</button>
           </div>
 
           <div style={styles.panelTabs}>
@@ -1271,31 +1274,41 @@ function Field({ label, err, children }) {
   );
 }
 
-// ---------------- CANDADO DEL PANEL ----------------
+// ---------------- CANDADO DEL PANEL (login de administradora) ----------------
 function PinGate({ onOk }) {
-  const [pin, setPin] = useState("");
+  const [usuario, setUsuario] = useState("");
+  const [clave, setClave] = useState("");
   const [error, setError] = useState(false);
   const submit = () => {
-    if (pin === PANEL_PIN) onOk();
-    else { setError(true); setPin(""); }
+    if (usuario.trim().toLowerCase() === ADMIN_USUARIO && clave === ADMIN_CLAVE) {
+      try { localStorage.setItem("admin_ok", "1"); } catch (e) {}
+      onOk();
+    } else { setError(true); }
   };
   return (
-    <div className="fadeup" style={{ maxWidth: 360, margin: "40px auto", textAlign: "center" }}>
+    <div className="fadeup" style={{ maxWidth: 380, margin: "40px auto", textAlign: "center" }}>
       <div style={{ fontSize: 52 }}>🔒</div>
-      <h1 style={{ fontFamily: "'Baloo 2', cursive", fontSize: 26, color: "#4A2C3A", margin: "8px 0 4px" }}>Panel privado</h1>
-      <p style={{ color: "#7a6570", marginBottom: 18 }}>Ingresa la contraseña para administrar.</p>
+      <h1 style={{ fontFamily: "'Baloo 2', cursive", fontSize: 26, color: "#4A2C3A", margin: "8px 0 4px" }}>Panel de administradora</h1>
+      <p style={{ color: "#7a6570", marginBottom: 18 }}>Inicia sesión para administrar tu tienda.</p>
       <div style={styles.pinCard}>
         <input
-          type="password"
-          inputMode="numeric"
-          value={pin}
-          onChange={(e) => { setPin(e.target.value.replace(/\D/g, "")); setError(false); }}
+          value={usuario}
+          onChange={(e) => { setUsuario(e.target.value); setError(false); }}
           onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-          placeholder="••••"
+          placeholder="Usuario"
           autoFocus
-          style={{ ...inp(error), textAlign: "center", letterSpacing: 10, fontSize: 24, fontWeight: 800 }}
+          autoCapitalize="none"
+          style={{ ...inp(error), marginBottom: 10 }}
         />
-        {error && <div style={{ color: "#D63384", fontWeight: 800, fontSize: 13, marginTop: 8 }}>Contraseña incorrecta</div>}
+        <input
+          type="password"
+          value={clave}
+          onChange={(e) => { setClave(e.target.value); setError(false); }}
+          onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+          placeholder="Contraseña"
+          style={inp(error)}
+        />
+        {error && <div style={{ color: "#D63384", fontWeight: 800, fontSize: 13, marginTop: 8 }}>Usuario o contraseña incorrectos</div>}
         <button className="cta" style={{ width: "100%", marginTop: 14 }} onClick={submit}>Entrar</button>
       </div>
     </div>
@@ -2080,13 +2093,50 @@ function Boletin() {
 }
 
 // ---------------- VISTA: MI PANEL (distribuidora, tiempo real) ----------------
+const hashClave = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return "h" + h.toString(36); }
 function MiPanel() {
   const money = (n) => "$" + Math.round(n || 0).toLocaleString("es-MX")
   const [codigo, setCodigo] = useState(() => { try { return localStorage.getItem("mi_codigo_dist") || "" } catch (e) { return "" } })
   const [activo, setActivo] = useState(() => { try { return !!localStorage.getItem("mi_codigo_dist") } catch (e) { return false } })
-  const [entrada, setEntrada] = useState("")
   const [rows, setRows] = useState([])
   const [cargando, setCargando] = useState(false)
+  // login / creación de acceso de distribuidora
+  const [modo, setModo] = useState("login") // login | crear
+  const [fUser, setFUser] = useState("")
+  const [fPass, setFPass] = useState("")
+  const [fCode, setFCode] = useState("")
+  const [msg, setMsg] = useState("")
+  const [ocupado, setOcupado] = useState(false)
+
+  const login = async () => {
+    if (!supabase) return
+    const u = fUser.trim().toLowerCase()
+    if (!u || !fPass) { setMsg("Escribe tu usuario y contraseña"); return }
+    setOcupado(true); setMsg("")
+    const { data } = await supabase.from("distribuidoras").select("codigo,usuario,clave").eq("usuario", u).limit(1)
+    const row = data && data[0]
+    setOcupado(false)
+    if (!row || row.clave !== hashClave(fPass)) { setMsg("Usuario o contraseña incorrectos"); return }
+    try { localStorage.setItem("mi_codigo_dist", row.codigo) } catch (e) {}
+    setCodigo(row.codigo); setActivo(true)
+  }
+  const crearAcceso = async () => {
+    if (!supabase) return
+    const c = fCode.trim().toUpperCase().replace(/\s+/g, "")
+    const u = fUser.trim().toLowerCase()
+    if (!c || !u || !fPass) { setMsg("Llena tu código, usuario y contraseña"); return }
+    if (fPass.length < 4) { setMsg("La contraseña debe tener al menos 4 caracteres"); return }
+    setOcupado(true); setMsg("")
+    const { data: found } = await supabase.from("distribuidoras").select("codigo").eq("codigo", c).limit(1)
+    if (!found || !found.length) { setOcupado(false); setMsg("Ese código no existe. Regístrate primero en “Quiero ser distribuidor”."); return }
+    const { data: taken } = await supabase.from("distribuidoras").select("codigo").eq("usuario", u).neq("codigo", c).limit(1)
+    if (taken && taken.length) { setOcupado(false); setMsg("Ese usuario ya está en uso, elige otro"); return }
+    const { error } = await supabase.from("distribuidoras").update({ usuario: u, clave: hashClave(fPass) }).eq("codigo", c)
+    setOcupado(false)
+    if (error) { setMsg("No se pudo crear tu acceso, intenta de nuevo"); return }
+    try { localStorage.setItem("mi_codigo_dist", c) } catch (e) {}
+    setCodigo(c); setActivo(true)
+  }
 
   const cargar = async (cod) => {
     if (!supabase || !cod) return
@@ -2103,13 +2153,7 @@ function MiPanel() {
     return () => supabase.removeChannel(ch)
   }, [activo, codigo])
 
-  const entrar = () => {
-    const c = entrada.trim().toUpperCase().replace(/\s+/g, "")
-    if (!c) return
-    try { localStorage.setItem("mi_codigo_dist", c) } catch (e) {}
-    setCodigo(c); setActivo(true)
-  }
-  const salir = () => { try { localStorage.removeItem("mi_codigo_dist") } catch (e) {} setActivo(false); setCodigo(""); setRows([]); setEntrada("") }
+  const salir = () => { try { localStorage.removeItem("mi_codigo_dist") } catch (e) {} setActivo(false); setCodigo(""); setRows([]); setFUser(""); setFPass(""); setFCode(""); setMsg("") }
 
   const k = useMemo(() => {
     let piezas = 0, costo = 0, ganancia = 0
@@ -2133,16 +2177,32 @@ function MiPanel() {
   if (!activo) return (
     <div className="fadeup">
       <section style={{ textAlign: "center", padding: "18px 0 10px" }}>
-        <h1 style={styles.heroTitle}>Mi panel de distribuidora</h1>
-        <p style={styles.heroSub}>Escribe tu código para ver cuántas papitas moviste, a qué precio y tu ganancia estimada.</p>
+        <h1 style={styles.heroTitle}>Mi tablero de distribuidora</h1>
+        <p style={styles.heroSub}>Entra con tu usuario para ver cuántas papitas moviste, a qué precio y tu ganancia estimada.</p>
       </section>
       <div style={styles.rastrearCard}>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <input style={{ ...inp(), flex: "1 1 200px" }} placeholder="Tu código (ej. 111)" value={entrada}
-            onChange={(e) => setEntrada(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") entrar() }} />
-          <button className="cta" onClick={entrar}>Entrar</button>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <button className="tabbtn" style={modo === "login" ? styles.ptabActive : styles.ptabIdle} onClick={() => { setModo("login"); setMsg("") }}>Iniciar sesión</button>
+          <button className="tabbtn" style={modo === "crear" ? styles.ptabActive : styles.ptabIdle} onClick={() => { setModo("crear"); setMsg("") }}>Crear mi acceso</button>
         </div>
-        <p style={{ fontSize: 12, color: "#8a7683", marginTop: 10 }}>¿Aún no tienes código? Regístrate en “Quiero ser distribuidor”.</p>
+
+        {modo === "login" ? (
+          <>
+            <input style={{ ...inp(), marginBottom: 10 }} placeholder="Usuario" autoCapitalize="none" value={fUser} onChange={(e) => setFUser(e.target.value)} />
+            <input style={inp()} type="password" placeholder="Contraseña" value={fPass} onChange={(e) => setFPass(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") login() }} />
+            <button className="cta" style={{ width: "100%", marginTop: 14 }} onClick={login} disabled={ocupado}>{ocupado ? "Entrando…" : "Entrar"}</button>
+            <p style={{ fontSize: 12, color: "#8a7683", marginTop: 10 }}>¿Primera vez? Toca “Crear mi acceso” y usa el código que te dio la página al registrarte.</p>
+          </>
+        ) : (
+          <>
+            <input style={{ ...inp(), marginBottom: 10 }} placeholder="Tu código de distribuidora (ej. 111)" value={fCode} onChange={(e) => setFCode(e.target.value)} />
+            <input style={{ ...inp(), marginBottom: 10 }} placeholder="Elige tu usuario" autoCapitalize="none" value={fUser} onChange={(e) => setFUser(e.target.value)} />
+            <input style={inp()} type="password" placeholder="Elige tu contraseña" value={fPass} onChange={(e) => setFPass(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") crearAcceso() }} />
+            <button className="cta" style={{ width: "100%", marginTop: 14 }} onClick={crearAcceso} disabled={ocupado}>{ocupado ? "Creando…" : "Crear mi acceso"}</button>
+            <p style={{ fontSize: 12, color: "#8a7683", marginTop: 10 }}>¿Aún no tienes código? Regístrate en “Quiero ser distribuidor”.</p>
+          </>
+        )}
+        {msg && <div style={{ color: "#D63384", fontWeight: 700, fontSize: 13, marginTop: 10 }}>{msg}</div>}
       </div>
     </div>
   )
@@ -2151,7 +2211,7 @@ function MiPanel() {
     <div className="fadeup">
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
         <span className="badge" style={{ background: "#9B6FCE", color: "#fff", fontWeight: 800, fontSize: 12, padding: "4px 10px", borderRadius: 999 }}>Código {codigo}</span>
-        <button className="ghost small" onClick={salir}>Cambiar código</button>
+        <button className="ghost small" onClick={salir}>Cerrar sesión</button>
       </div>
       <div style={styles.kpis}>
         <div className="kpi-c" style={{ ...kpiBox, borderTop: "5px solid #F2A93B" }}><div style={kpiV("#F2A93B")}>{k.piezas}</div><div style={kpiL}>Piezas movidas</div></div>
@@ -2317,6 +2377,27 @@ function DistribuidorView({ onSubmit, onRegistrar, onGoTienda }) {
               En la tienda activa “Soy distribuidora” y escribe tu código. Tu precio inicial es
               provisional; te confirmaremos tus precios finales por WhatsApp.
             </p>
+
+            {/* invitación especial por WhatsApp */}
+            <div style={{ marginTop: 22, background: "#E9F9F4", border: "2px solid #CDEFE6", borderRadius: 18, padding: "18px 20px", maxWidth: 460, marginLeft: "auto", marginRight: "auto" }}>
+              <div style={{ fontSize: 30 }}>💚</div>
+              <h3 style={{ fontFamily: "'Baloo 2', cursive", fontSize: 20, color: "#1f8f78", margin: "4px 0 6px" }}>Tu lugar especial de distribuidora</h3>
+              <p style={{ fontSize: 14, color: "#3a6a60", lineHeight: 1.5, margin: "0 0 14px" }}>
+                Escríbenos para guardar tu contacto y compartirte marketing, ideas, promociones y
+                todo el material exclusivo para distribuidoras. ¡Queremos ayudarte a vender más! 💕
+              </p>
+              <a
+                className="cta"
+                href={`https://wa.me/${WHATSAPP_TIENDA}?text=${encodeURIComponent(
+                  "¡Hola! Soy " + (f.nombre || "una nueva distribuidora") + " 🎉 Me acabo de registrar como distribuidora de Papitas Saludables. Mi código es " + done.codigo + ". Quiero que guardes mi contacto para recibir marketing, ideas y promociones para distribuidoras 💕"
+                )}`}
+                target="_blank"
+                rel="noreferrer"
+                style={{ display: "inline-block", textDecoration: "none", background: "#25D366" }}
+              >
+                📲 Escríbenos por WhatsApp
+              </a>
+            </div>
           </>
         ) : (
           <p style={{ fontSize: 16, color: "#7a6570", lineHeight: 1.5 }}>

@@ -75,3 +75,11 @@ drop policy if exists pedidos_del on public.pedidos;
 create policy pedidos_del on public.pedidos for delete using (true);
 
 alter publication supabase_realtime add table public.pedidos;
+
+-- ============================================================
+-- ACCESO DE DISTRIBUIDORAS (usuario y contraseña que ellas crean)
+-- ============================================================
+alter table public.distribuidoras add column if not exists usuario text;
+alter table public.distribuidoras add column if not exists clave text;
+create unique index if not exists distribuidoras_usuario_key
+  on public.distribuidoras (usuario) where usuario is not null;
