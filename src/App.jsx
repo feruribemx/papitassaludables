@@ -150,6 +150,35 @@ const money = (n) => {
 const catColor = (cat) => (CATS[cat] ? CATS[cat].c : "#F04E97");
 const comisionTarjeta = (o) => (o.pago === "Tarjeta de crédito" ? Math.round(((o.total || 0) + (o.envio || 0)) * 0.035) : 0);
 const grandTotal = (o) => (o.total || 0) + (o.envio || 0) + comisionTarjeta(o) - (o.descuento || 0); // productos + envío + comisión − descuento
+
+// Arma el mensaje de un pedido y abre WhatsApp para reenviarlo/recuperarlo
+const reenviarPedidoWA = (o) => {
+  const c = o.cliente || {};
+  const lineas = (o.items || [])
+    .map((i) => `• ${i.qty} x ${i.sabor} (${i.categoria}${i.granel ? " granel" : ""}) — ${money((i.precio || 0) * i.qty)}`)
+    .join("\n");
+  const dir = [c.calle, c.colonia && "Col. " + c.colonia, c.cp && "C.P. " + c.cp, c.estado].filter(Boolean).join(", ");
+  const msg =
+    `🥔 *Pedido — Papitas Saludables*\n` +
+    `Folio: ${o.folio}\n` +
+    `Estatus: ${o.estatus}\n\n` +
+    `*Cliente:* ${c.nombre || ""}\n` +
+    (c.telefono ? `*Tel:* ${c.telefono}\n` : "") +
+    (c.correo ? `*Correo:* ${c.correo}\n` : "") +
+    (dir ? `*Dirección:* ${dir}\n` : "") +
+    (c.referencias ? `*Referencias:* ${c.referencias}\n` : "") +
+    (o.vendedora ? `*Vendedora:* ${o.vendedora}\n` : "") +
+    (o.esDistribuidora ? `*Distribuidora:* ${o.distribuidora || ""}${o.distNum ? " (núm. " + o.distNum + ")" : ""}\n` : "") +
+    `\n*Productos:*\n${lineas}\n\n` +
+    (o.envio ? `*Envío:* ${money(o.envio)}\n` : "") +
+    (comisionTarjeta(o) > 0 ? `*Comisión tarjeta (3.5%):* ${money(comisionTarjeta(o))}\n` : "") +
+    (o.descuento ? `*Descuento:* -${money(o.descuento)}\n` : "") +
+    `*Total:* ${money(grandTotal(o))}\n` +
+    `*Pago:* ${o.pago}${o.pagado ? " (PAGADO)" : ""}\n` +
+    (o.guia ? `*Guía:* ${(o.paqueteria || "").trim()} ${o.guia}\n` : "") +
+    (o.notas ? `*Notas:* ${o.notas}\n` : "");
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+};
 const catSoft = (cat) => (CATS[cat] ? CATS[cat].soft : "#FBD8E5");
 
 async function loadKey(key, fallback) {
@@ -1593,6 +1622,9 @@ function Pedidos({ orders, onAdvance, onSet, onDelete, onEnvio, onPagado, onCamp
                     <select className="statusel" value={o.estatus} onChange={(e) => onSet(o.folio, e.target.value)}>
                       {[...ESTATUS, "Cancelado"].map((s) => <option key={s}>{s}</option>)}
                     </select>
+                    <button className="tabbtn" style={{ background: "#25D366", color: "#fff", border: "2px solid #25D366", boxShadow: "0 4px 0 #1da851" }} onClick={() => reenviarPedidoWA(o)}>
+                      📲 Reenviar por WhatsApp
+                    </button>
                     <button className="ghost small danger" onClick={() => { if (confirm("¿Eliminar " + o.folio + "?")) onDelete(o.folio); }}>
                       Eliminar
                     </button>
@@ -2057,14 +2089,17 @@ function Boletin() {
 
   const cargar = async () => {
     if (!supabase) { setCargando(false); return }
+    const ym = new Date().toISOString().slice(0, 7) // mes en curso, ej. "2026-09"
     const { data } = await supabase.from("pedidos").select("data")
     const map = {}
     ;(data || []).forEach((r) => {
       const o = r.data; if (!o || o.estatus === "Cancelado") return
+      if (!o.fecha || o.fecha.slice(0, 7) !== ym) return // solo este mes
       ;(o.items || []).forEach((it) => {
         if (it.granel || !it.sabor) return
-        if (!map[it.sabor]) map[it.sabor] = { sabor: it.sabor, categoria: it.categoria, piezas: 0 }
-        map[it.sabor].piezas += it.qty
+        const nombre = `${it.categoria} ${it.sabor}`
+        if (!map[nombre]) map[nombre] = { nombre, categoria: it.categoria, piezas: 0 }
+        map[nombre].piezas += it.qty
       })
     })
     setRows(Object.values(map).sort((a, b) => b.piezas - a.piezas))
@@ -2078,28 +2113,30 @@ function Boletin() {
   }, [])
 
   const max = rows.length ? rows[0].piezas : 1
+  const mesN = new Date().toLocaleDateString("es-MX", { month: "long" })
+  const mesCap = mesN.charAt(0).toUpperCase() + mesN.slice(1)
 
   return (
     <div className="fadeup">
       <section style={{ textAlign: "center", padding: "18px 0 6px" }}>
-        <span className="promo-pill" style={{ display: "inline-block", marginBottom: 10 }}>En tiempo real ⚡</span>
-        <h1 style={styles.heroTitle}>Los más vendidos ahora mismo</h1>
-        <p style={styles.heroSub}>Ranking de sabores según todas las ventas (distribuidoras y menudeo). Se actualiza solo.</p>
+        <span className="promo-pill" style={{ display: "inline-block", marginBottom: 10 }}>{mesCap} · en tiempo real ⚡</span>
+        <h1 style={styles.heroTitle}>Los más vendidos de {mesCap}</h1>
+        <p style={styles.heroSub}>Ranking de sabores según todas las ventas del mes (distribuidoras y menudeo). Se actualiza solo.</p>
       </section>
       {!supabase ? (
         <Empty icon="☁️" text="Conecta Supabase (Fase 2) para ver el boletín en tiempo real." />
       ) : cargando ? (
         <Empty icon="⏳" text="Cargando el boletín…" />
       ) : rows.length === 0 ? (
-        <Empty icon="📊" text="Aún no hay ventas registradas. En cuanto entren pedidos, aparecerán aquí." />
+        <Empty icon="📊" text={`Aún no hay ventas en ${mesCap}. En cuanto entren pedidos, aparecerán aquí.`} />
       ) : (
         <div style={{ maxWidth: 620, margin: "0 auto" }}>
           {rows.slice(0, 12).map((r, i) => (
-            <div key={r.sabor} className="card" style={{ marginBottom: 10, padding: "12px 16px" }}>
+            <div key={r.nombre} className="card" style={{ marginBottom: 10, padding: "12px 16px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontFamily: "'Baloo 2', cursive", fontSize: 22, color: i < 3 ? "#F04E97" : "#c9b6c0", width: 32 }}>{i + 1}</span>
                 <span style={{ ...styles.dot, background: catColor(r.categoria) }} />
-                <span style={{ flex: 1, fontWeight: 800 }}>{r.sabor}</span>
+                <span style={{ flex: 1, fontWeight: 800 }}>{r.nombre}</span>
                 <span style={{ fontFamily: "'Baloo 2', cursive", color: "#4A2C3A" }}>{r.piezas} pza</span>
               </div>
               <div style={{ marginTop: 8, height: 8, background: "#f2e6da", borderRadius: 999, overflow: "hidden" }}>
