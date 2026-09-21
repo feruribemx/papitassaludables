@@ -28,7 +28,7 @@ const precioDistribuidora = (cfg, p) =>
 
 // ---------- Número de WhatsApp del negocio (para recibir pedidos) ----------
 // Formato wa.me: 52 + 10 dígitos, sin espacios ni símbolos.
-const WHATSAPP_TIENDA = "523314657995";
+const WHATSAPP_TIENDA = "523334736922";
 
 // ---------- Acceso del administrador (login del Panel) ----------
 const ADMIN_USUARIO = "papitasadmin";
