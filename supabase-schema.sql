@@ -83,3 +83,14 @@ alter table public.distribuidoras add column if not exists usuario text;
 alter table public.distribuidoras add column if not exists clave text;
 create unique index if not exists distribuidoras_usuario_key
   on public.distribuidoras (usuario) where usuario is not null;
+
+-- ============================================================
+-- FOLIOS SECUENCIALES DE PEDIDOS (empiezan en 125: 125,126,127…)
+-- ============================================================
+create sequence if not exists public.folio_seq start with 125;
+create or replace function public.siguiente_folio()
+returns bigint language sql security definer
+set search_path = public as $$
+  select nextval('public.folio_seq');
+$$;
+grant execute on function public.siguiente_folio() to anon;

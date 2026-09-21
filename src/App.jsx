@@ -405,8 +405,15 @@ export default function App() {
     supabase.from("pedidos").delete().eq("folio", folio).then(() => {});
   };
 
-  const placeOrder = (cliente, extras) => {
-    const folio = "PED-" + Date.now().toString(36).toUpperCase().slice(-6);
+  const placeOrder = async (cliente, extras) => {
+    let folio = "";
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.rpc("siguiente_folio");
+        if (!error && data != null) folio = "PED-" + data;
+      } catch (e) {}
+    }
+    if (!folio) folio = "PED-" + Date.now().toString(36).toUpperCase().slice(-6); // respaldo si no hay nube
     const order = {
       folio,
       fecha: new Date().toISOString(),
@@ -606,6 +613,13 @@ export default function App() {
           </button>
           <button
             className="tabbtn"
+            style={view === "distribuidor" ? styles.navDist : styles.navIdle}
+            onClick={() => setView("distribuidor")}
+          >
+            🤝 Quiero ser distribuidor
+          </button>
+          <button
+            className="tabbtn"
             style={view === "boletin" ? styles.navActive : styles.navIdle}
             onClick={() => setView("boletin")}
           >
@@ -617,13 +631,6 @@ export default function App() {
             onClick={() => setView("mipanel")}
           >
             📈 Mi tablero
-          </button>
-          <button
-            className="tabbtn"
-            style={view === "distribuidor" ? styles.navDist : styles.navIdle}
-            onClick={() => setView("distribuidor")}
-          >
-            🤝 Quiero ser distribuidor
           </button>
           <button
             className="tabbtn"
@@ -926,6 +933,7 @@ export default function App() {
           distribuidora={distOk ? `${distNombre} (núm. ${distNum.trim()})` : ""}
           prefill={distOk ? { nombre: distNombre, ...(distConfig.datos || {}) } : null}
           clientes={listaClientes(orders, manuales, CLIENTES)}
+          vendedoras={Array.from(new Set([...VENDEDORAS, ...Object.values(distsRemote).map((d) => d.nombre).filter(Boolean)]))}
           onClose={() => setCheckout(false)}
           onFinish={finishCheckout}
           onSubmit={placeOrder}
@@ -1037,12 +1045,12 @@ function GranelCard({ p, cart, precioGranelDe, onAdd }) {
   );
 }
 
-function Checkout({ total, items, count, unit, nivel, ahorro, codigo, distribuidora, prefill, clientes, onClose, onFinish, onSubmit }) {
+function Checkout({ total, items, count, unit, nivel, ahorro, codigo, distribuidora, prefill, clientes, vendedoras = VENDEDORAS, onClose, onFinish, onSubmit }) {
   const [f, setF] = useState({
     nombre: prefill?.nombre || "", telefono: prefill?.telefono || "", correo: prefill?.correo || "",
     calle: prefill?.calle || "", colonia: prefill?.colonia || "", cp: prefill?.cp || "",
     estado: prefill?.estado || "", referencias: prefill?.referencias || "", pago: "Efectivo", notas: "",
-    vendedora: (prefill?.nombre && VENDEDORAS.includes(prefill.nombre)) ? prefill.nombre : "", vendedoraOtra: "",
+    vendedora: (prefill?.nombre && vendedoras.includes(prefill.nombre)) ? prefill.nombre : "", vendedoraOtra: "",
   });
   const [busqueda, setBusqueda] = useState("");
   const matches = useMemo(() => {
@@ -1081,10 +1089,13 @@ function Checkout({ total, items, count, unit, nivel, ahorro, codigo, distribuid
     return Object.keys(e).length === 0;
   };
 
-  const submit = () => {
+  const [enviando, setEnviando] = useState(false);
+  const submit = async () => {
     if (!validate()) return;
+    if (enviando) return;
+    setEnviando(true);
     const vend = f.vendedora === "__otra__" ? f.vendedoraOtra.trim() : f.vendedora;
-    const folio = onSubmit(
+    const folio = await onSubmit(
       {
         nombre: f.nombre.trim(), telefono: f.telefono.trim(), correo: f.correo.trim(),
         calle: f.calle.trim(), colonia: f.colonia.trim(), cp: f.cp.trim(),
@@ -1114,6 +1125,7 @@ function Checkout({ total, items, count, unit, nivel, ahorro, codigo, distribuid
       (f.notas.trim() ? `\n*Notas:* ${f.notas.trim()}` : "");
     const waUrl = `https://wa.me/${WHATSAPP_TIENDA}?text=${encodeURIComponent(msg)}`;
     setDone({ folio, waUrl });
+    setEnviando(false);
   };
 
   // ----- pantalla de éxito con botón de WhatsApp -----
@@ -1224,7 +1236,7 @@ function Checkout({ total, items, count, unit, nivel, ahorro, codigo, distribuid
             <Field label="¿Quién te ofreció las papitas? *" err={err.vendedora}>
               <select style={inp(err.vendedora)} value={f.vendedora} onChange={set("vendedora")}>
                 <option value="">Selecciona…</option>
-                {VENDEDORAS.map((v) => <option key={v} value={v}>{v}</option>)}
+                {vendedoras.map((v) => <option key={v} value={v}>{v}</option>)}
                 <option value="__otra__">Otra (escribir nombre)</option>
                 <option value="Compra directa">Nadie / compra directa</option>
               </select>
@@ -1258,7 +1270,7 @@ function Checkout({ total, items, count, unit, nivel, ahorro, codigo, distribuid
 
         <div style={styles.modalFoot}>
           <button className="ghost" onClick={onClose}>Volver</button>
-          <button className="cta" onClick={submit}>Confirmar y enviar por WhatsApp →</button>
+          <button className="cta" onClick={submit} disabled={enviando}>{enviando ? "Generando folio…" : "Confirmar y enviar por WhatsApp →"}</button>
         </div>
       </div>
     </>
@@ -1444,7 +1456,8 @@ function Pedidos({ orders, onAdvance, onSet, onDelete, onEnvio, onPagado, onCamp
   const [f, setF] = useState("Todos");
   const [open, setOpen] = useState(null);
   const [editCli, setEditCli] = useState(null); // folio del pedido cuyo cliente se edita
-  const list = f === "Todos" ? orders : orders.filter((o) => o.estatus === f);
+  const base = f === "Todos" ? orders : orders.filter((o) => o.estatus === f);
+  const list = [...base].sort((a, b) => (b.esDistribuidora ? 1 : 0) - (a.esDistribuidora ? 1 : 0));
 
   if (orders.length === 0) return <Empty big icon="📭" text="Aún no hay pedidos. Los que lleguen desde la tienda aparecerán aquí." />;
 
@@ -1465,11 +1478,12 @@ function Pedidos({ orders, onAdvance, onSet, onDelete, onEnvio, onPagado, onCamp
           const isOpen = open === o.folio;
           const d = new Date(o.fecha);
           return (
-            <div key={o.folio} className="ordercard">
+            <div key={o.folio} className="ordercard" style={o.esDistribuidora ? { borderLeft: "6px solid #9B6FCE", background: "#FBF7FF" } : undefined}>
               <div style={styles.orderHead} onClick={() => setOpen(isOpen ? null : o.folio)}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={styles.orderFolio}>
                     {o.folio}
+                    {o.esDistribuidora && <span className="statebad" style={{ background: "#9B6FCE" }}>⭐ Distribuidora</span>}
                     <span className="statebad" style={{ background: ESTATUS_COLOR[o.estatus] }}>{o.estatus}</span>
                     <span className="statebad" style={{ background: o.pagado ? "#2FB6A0" : "#D63384" }}>{o.pagado ? "Pagado" : "No pagado"}</span>
                   </div>
@@ -2429,6 +2443,8 @@ function DistribuidorView({ onSubmit, onRegistrar, onGoTienda }) {
         <Benefit color="#9B6FCE" icon="🤝" title="Acompañamiento" text="Te asesoramos con surtido y reabasto según tu demanda." />
         <Benefit color="#E8477E" icon="🥕" title="Producto que se vende" text="Botana natural deshidratada, sin freír. Sabores que enganchan y repiten." />
         <Benefit color="#9FC131" icon="📸" title="Material para vender" text="Te compartimos fotos y contenido listo para promocionar en tus redes." />
+        <Benefit color="#2FB6A0" icon="📍" title="Clientes en tu zona" text="Cuando recibimos clientes de tu ciudad o zona, podemos canalizarlos contigo para facilitar la compra y ayudarte a generar más ventas." />
+        <Benefit color="#F2A93B" icon="💡" title="Estrategias para vender más" text="Recibes promociones, ideas y herramientas de venta para ayudarte a mover tu producto, atraer clientes y hacer crecer tus pedidos." />
       </div>
 
       {/* precios por volumen */}
