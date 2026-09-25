@@ -886,7 +886,6 @@ export default function App() {
                           style={{ width: 48, textAlign: "center", border: "2px solid #f2d9e6", borderRadius: 8, padding: "4px 2px", fontFamily: "'Baloo 2', cursive", fontSize: 16, color: "#4A2C3A", background: "#fff" }}
                         />
                         <button className="stepbtn" onClick={() => setQty(i.key, i.qty + 1)}>+</button>
-                        {!i.granel && <button className="stepbtn" style={{ width: "auto", padding: "0 10px", fontSize: 13, fontWeight: 800 }} onClick={() => setQty(i.key, 25)}>25</button>}
                       </div>
                       <div style={styles.cartPrice}>{money(i.importe)}</div>
                     </div>
