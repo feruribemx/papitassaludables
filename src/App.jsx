@@ -501,6 +501,8 @@ export default function App() {
       const { error } = await supabase.from("distribuidoras").insert({
         codigo, nombre: data.nombre, telefono: data.telefono, correo: data.correo,
         estado: data.estado, ciudad: data.ciudad, costo_base: PRECIO_PROVISIONAL,
+        negocio: data.negocio || null, tipo: data.tipo || null, volumen: data.volumen || null,
+        mensaje: data.mensaje || null, estatus: "Nuevo",
       });
       if (!error) {
         setDistsRemote((m) => ({ ...m, [codigo]: { nombre: data.nombre, base: PRECIO_PROVISIONAL } }));
@@ -2652,22 +2654,42 @@ function Benefit({ color, icon, title, text }) {
 function Distribuidores({ distribs, onSet, onDelete }) {
   const [q, setQ] = useState("");
   const [fil, setFil] = useState("Todos");
+  const [rows, setRows] = useState([]);
+  const [cargando, setCargando] = useState(true);
 
-  let list = distribs;
-  if (fil !== "Todos") list = list.filter((d) => d.estatus === fil);
+  const cargar = async () => {
+    if (!supabase) { setCargando(false); return; }
+    const { data } = await supabase.from("distribuidoras").select("*").order("creado", { ascending: false });
+    setRows(data || []);
+    setCargando(false);
+  };
+  useEffect(() => {
+    cargar();
+    if (!supabase) return;
+    const ch = supabase.channel("dist_admin").on("postgres_changes", { event: "*", schema: "public", table: "distribuidoras" }, cargar).subscribe();
+    return () => supabase.removeChannel(ch);
+  }, []);
+
+  const cambiarEstatus = async (codigo, estatus) => { if (supabase) { await supabase.from("distribuidoras").update({ estatus }).eq("codigo", codigo); cargar(); } };
+  const eliminar = async (codigo) => { if (supabase && confirm("¿Eliminar la distribuidora " + codigo + "?")) { await supabase.from("distribuidoras").delete().eq("codigo", codigo); cargar(); } };
+
+  let list = rows;
+  if (fil !== "Todos") list = list.filter((d) => (d.estatus || "Nuevo") === fil);
   list = list.filter((d) =>
-    (d.nombre + " " + (d.negocio || "") + " " + d.estado + " " + (d.ciudad || "") + " " + d.telefono)
+    ((d.codigo || "") + " " + (d.nombre || "") + " " + (d.negocio || "") + " " + (d.estado || "") + " " + (d.ciudad || "") + " " + (d.telefono || ""))
       .toLowerCase().includes(q.toLowerCase())
   );
 
-  if (distribs.length === 0)
-    return <Empty big icon="🤝" text="Aún no hay solicitudes. Las que lleguen desde “Quiero ser distribuidor” aparecerán aquí." />;
+  if (!supabase) return <Empty big icon="☁️" text="Conecta Supabase para ver las distribuidoras registradas." />;
+  if (cargando) return <Empty big icon="⏳" text="Cargando distribuidoras…" />;
+  if (rows.length === 0)
+    return <Empty big icon="🤝" text="Aún no hay distribuidoras registradas. Las que se registren desde “Quiero ser distribuidor” aparecerán aquí." />;
 
   return (
     <div className="fadeup">
       <input
         style={{ ...inp(), maxWidth: 320, marginBottom: 14 }}
-        placeholder="Buscar por nombre, negocio, estado…"
+        placeholder="Buscar por código, nombre, estado…"
         value={q}
         onChange={(e) => setQ(e.target.value)}
       />
@@ -2680,39 +2702,41 @@ function Distribuidores({ distribs, onSet, onDelete }) {
       </div>
 
       {list.length === 0 ? (
-        <Empty icon="🔎" text="No hay solicitudes con ese filtro." />
+        <Empty icon="🔎" text="No hay distribuidoras con ese filtro." />
       ) : (
         <div style={styles.clientGrid}>
           {list.map((d) => {
-            const tel = d.telefono.replace(/\D/g, "");
+            const tel = (d.telefono || "").replace(/\D/g, "");
             const wa = "https://wa.me/52" + tel + "?text=" + encodeURIComponent(
-              `Hola ${d.nombre}, gracias por tu interés en ser distribuidor de Papitas Saludables. Te comparto nuestros precios preferenciales:`
+              `Hola ${d.nombre}, gracias por registrarte como distribuidora de Papitas Saludables. Tu código es ${d.codigo}. Te comparto tus precios y todo lo que necesitas 💕`
             );
-            const fecha = new Date(d.fecha).toLocaleDateString("es-MX", { day: "2-digit", month: "short", year: "numeric" });
+            const est = d.estatus || "Nuevo";
+            const fecha = d.creado ? new Date(d.creado).toLocaleDateString("es-MX", { day: "2-digit", month: "short", year: "numeric" }) : "";
             return (
-              <div key={d.folio} className="clientcard">
+              <div key={d.codigo} className="clientcard">
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontFamily: "'Baloo 2', cursive", fontSize: 15 }}>{d.folio}</span>
-                  <span className="statebad" style={{ background: DIST_COLOR[d.estatus] }}>{d.estatus}</span>
+                  <span style={{ fontFamily: "'Baloo 2', cursive", fontSize: 18, color: "#9B6FCE" }}>Código {d.codigo}</span>
+                  <span className="statebad" style={{ background: DIST_COLOR[est] || "#9B6FCE" }}>{est}</span>
                   <span style={{ marginLeft: "auto", fontSize: 12, color: "#a08a96" }}>{fecha}</span>
                 </div>
                 <div style={styles.clientName}>{d.nombre}</div>
                 {d.negocio && <div style={{ fontSize: 13, color: "#5a4450", fontWeight: 700 }}>{d.negocio}</div>}
                 <div style={{ ...styles.clientBody, marginTop: 8 }}>
-                  <div>📞 {d.telefono}</div>
+                  {d.telefono && <div>📞 {d.telefono}</div>}
                   {d.correo && <div>✉️ {d.correo}</div>}
                   <div>📍 {d.ciudad ? d.ciudad + ", " : ""}{d.estado}</div>
                   {d.tipo && <div style={{ color: "#8a7683" }}>Negocio: {d.tipo}</div>}
                   {d.volumen && <div style={{ color: "#8a7683" }}>Compra estimada: {d.volumen}</div>}
+                  <div style={{ color: d.usuario ? "#2FB6A0" : "#c99", fontWeight: 700 }}>{d.usuario ? "✓ Ya creó su acceso" : "Sin acceso aún"}</div>
                   {d.mensaje && <div style={{ marginTop: 6, background: "#FBF3E9", borderRadius: 10, padding: "8px 10px", fontSize: 13 }}>📝 {d.mensaje}</div>}
                 </div>
                 <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
                   <a className="wabtn" href={wa} target="_blank" rel="noopener noreferrer">WhatsApp</a>
                   {d.correo && <a className="wabtn mail" href={"mailto:" + d.correo}>Correo</a>}
-                  <select className="statusel" value={d.estatus} onChange={(e) => onSet(d.folio, e.target.value)}>
+                  <select className="statusel" value={est} onChange={(e) => cambiarEstatus(d.codigo, e.target.value)}>
                     {DIST_ESTATUS.map((s) => <option key={s}>{s}</option>)}
                   </select>
-                  <button className="ghost small danger" onClick={() => { if (confirm("¿Eliminar " + d.folio + "?")) onDelete(d.folio); }}>✕</button>
+                  <button className="ghost small danger" onClick={() => eliminar(d.codigo)}>✕</button>
                 </div>
               </div>
             );
