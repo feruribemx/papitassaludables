@@ -179,6 +179,19 @@ const reenviarPedidoWA = (o) => {
     (o.notas ? `*Notas:* ${o.notas}\n` : "");
   window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
 };
+
+// Paqueterías y su liga de rastreo (FedEx y DHL abren con el número puesto)
+const PAQUETERIAS = ["FedEx", "DHL", "Estafeta", "Paquete Express", "Otra"];
+const rastreoURL = (paq, guia) => {
+  const g = encodeURIComponent((guia || "").trim());
+  switch (paq) {
+    case "FedEx": return `https://www.fedex.com/fedextrack/?trknbr=${g}`;
+    case "DHL": return `https://www.dhl.com/mx-es/home/rastreo.html?tracking-id=${g}&submit=1`;
+    case "Estafeta": return `https://www.estafeta.com/herramientas/rastreo`;
+    case "Paquete Express": return `https://www.paquetexpress.com.mx/`;
+    default: return "";
+  }
+};
 const catSoft = (cat) => (CATS[cat] ? CATS[cat].soft : "#FBD8E5");
 
 async function loadKey(key, fallback) {
@@ -865,8 +878,15 @@ export default function App() {
                       </div>
                       <div style={styles.stepper}>
                         <button className="stepbtn" onClick={() => setQty(i.key, i.qty - 1)}>−</button>
-                        <span style={styles.qty}>{i.qty}</span>
+                        <input
+                          value={i.qty}
+                          onFocus={(e) => e.target.select()}
+                          onChange={(e) => { const v = e.target.value.replace(/[^0-9]/g, ""); setQty(i.key, v === "" ? 1 : parseInt(v, 10)); }}
+                          inputMode="numeric"
+                          style={{ width: 48, textAlign: "center", border: "2px solid #f2d9e6", borderRadius: 8, padding: "4px 2px", fontFamily: "'Baloo 2', cursive", fontSize: 16, color: "#4A2C3A", background: "#fff" }}
+                        />
                         <button className="stepbtn" onClick={() => setQty(i.key, i.qty + 1)}>+</button>
+                        {!i.granel && <button className="stepbtn" style={{ width: "auto", padding: "0 10px", fontSize: 13, fontWeight: 800 }} onClick={() => setQty(i.key, 25)}>25</button>}
                       </div>
                       <div style={styles.cartPrice}>{money(i.importe)}</div>
                     </div>
@@ -1485,6 +1505,18 @@ function Pedidos({ orders, onAdvance, onSet, onDelete, onEnvio, onPagado, onCamp
   const [f, setF] = useState("Todos");
   const [open, setOpen] = useState(null);
   const [editCli, setEditCli] = useState(null); // folio del pedido cuyo cliente se edita
+  const [subiendo, setSubiendo] = useState(null); // folio cuyo archivo se está subiendo
+  const subirGuia = async (folio, file) => {
+    if (!supabase || !file) { alert("Necesitas conexión para subir el archivo."); return; }
+    setSubiendo(folio);
+    const ext = (file.name.split(".").pop() || "pdf").toLowerCase();
+    const path = `${folio}-${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from("guias").upload(path, file, { upsert: true });
+    if (error) { setSubiendo(null); alert("No se pudo subir la guía: " + error.message); return; }
+    const { data } = supabase.storage.from("guias").getPublicUrl(path);
+    onCampo(folio, "guiaUrl", data.publicUrl);
+    setSubiendo(null);
+  };
   const base = f === "Todos" ? orders : orders.filter((o) => o.estatus === f);
   const list = [...base].sort((a, b) => (b.esDistribuidora ? 1 : 0) - (a.esDistribuidora ? 1 : 0));
 
@@ -1584,12 +1616,14 @@ function Pedidos({ orders, onAdvance, onSet, onDelete, onEnvio, onPagado, onCamp
                       <div style={styles.guiaBox}>
                         <h4 style={{ ...styles.bodyH, margin: "0 0 8px" }}>Guía de envío</h4>
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <input
+                          <select
                             style={{ ...inp(), flex: "1 1 120px", padding: "8px 10px" }}
-                            placeholder="Paquetería (ej. Estafeta)"
                             value={o.paqueteria || ""}
                             onChange={(e) => onCampo(o.folio, "paqueteria", e.target.value)}
-                          />
+                          >
+                            <option value="">Paquetería…</option>
+                            {PAQUETERIAS.map((p) => <option key={p} value={p}>{p}</option>)}
+                          </select>
                           <input
                             style={{ ...inp(), flex: "1 1 140px", padding: "8px 10px" }}
                             placeholder="Número de guía"
@@ -1597,8 +1631,22 @@ function Pedidos({ orders, onAdvance, onSet, onDelete, onEnvio, onPagado, onCamp
                             onChange={(e) => onCampo(o.folio, "guia", e.target.value)}
                           />
                         </div>
-                        <p style={{ fontSize: 12, color: "#8a7683", margin: "6px 2px 0" }}>
-                          Al capturar la guía, el cliente podrá consultarla en “Rastrea tu pedido”.
+                        {o.guia && o.paqueteria && rastreoURL(o.paqueteria, o.guia) && (
+                          <a className="ghost small" style={{ display: "inline-block", marginTop: 8, textDecoration: "none" }} href={rastreoURL(o.paqueteria, o.guia)} target="_blank" rel="noreferrer">
+                            🔎 Rastrear en {o.paqueteria}
+                          </a>
+                        )}
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
+                          <label className="ghost small" style={{ cursor: "pointer", margin: 0 }}>
+                            {subiendo === o.folio ? "Subiendo…" : (o.guiaUrl ? "📎 Cambiar archivo de guía" : "📎 Subir archivo de guía")}
+                            <input type="file" accept=".pdf,image/*" style={{ display: "none" }} onChange={(e) => { if (e.target.files[0]) subirGuia(o.folio, e.target.files[0]); e.target.value = ""; }} />
+                          </label>
+                          {o.guiaUrl && (
+                            <a className="ghost small" style={{ textDecoration: "none", color: "#2FB6A0" }} href={o.guiaUrl} target="_blank" rel="noreferrer">✓ Ver guía subida</a>
+                          )}
+                        </div>
+                        <p style={{ fontSize: 12, color: "#8a7683", margin: "8px 2px 0" }}>
+                          Al capturar la guía o subir el archivo, el cliente podrá consultarlo y descargarlo en “Rastrea tu pedido”.
                         </p>
                       </div>
                     </div>
@@ -2357,10 +2405,18 @@ function RastrearView({ orders }) {
               Hola <b>{o.cliente.nombre.split(" ")[0]}</b>, tu pedido de {o.items.reduce((a, i) => a + i.qty, 0)} pza va así:
             </div>
             <div style={styles.rastreoGuia}>
-              {o.guia ? (
+              {o.guia || o.guiaUrl ? (
                 <>
                   <div>🚚 Paquetería: <b>{o.paqueteria || "Por definir"}</b></div>
-                  <div>🔖 Número de guía: <b style={{ color: "#F04E97" }}>{o.guia}</b></div>
+                  {o.guia && <div>🔖 Número de guía: <b style={{ color: "#F04E97" }}>{o.guia}</b></div>}
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                    {o.guiaUrl && (
+                      <a className="cta small" style={{ textDecoration: "none" }} href={o.guiaUrl} target="_blank" rel="noreferrer">⬇️ Descargar guía</a>
+                    )}
+                    {o.guia && o.paqueteria && rastreoURL(o.paqueteria, o.guia) && (
+                      <a className="cta small" style={{ textDecoration: "none", background: "#2FB6A0" }} href={rastreoURL(o.paqueteria, o.guia)} target="_blank" rel="noreferrer">🔎 Rastrear en {o.paqueteria}</a>
+                    )}
+                  </div>
                 </>
               ) : (
                 <div style={{ color: "#8a7683" }}>
